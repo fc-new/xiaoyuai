@@ -53,6 +53,8 @@ test('creates an order with a server-owned price and stores only a hash of the a
   assert.equal(response.status, 201); assert.equal(body.order.amount, 16800); assert.equal(body.order.status, 'pending_payment');
   assert.equal(body.order.email, 'test@example.com'); assert.equal(body.accessCode.length, 16);
   credentials = { orderId: body.order.id, accessCode: body.accessCode };
+  // Keep this existing suite as the legacy-order compatibility path. New commerce is tested separately.
+  await db.prepare('DELETE FROM purchase_orders WHERE order_id=?').run(body.order.id);
   const row = (await db.prepare('SELECT access_hash FROM orders WHERE id=?').get<{ access_hash: string }>(credentials.orderId))!;
   assert.notEqual(row.access_hash, credentials.accessCode); assert.equal(row.access_hash.length, 64);
   assert.equal(body.order.access_hash, undefined);

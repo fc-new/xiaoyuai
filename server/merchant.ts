@@ -122,7 +122,7 @@ export class MerchantPayments {
       if (channel === 'wechat') {
         const c = this.config.wechat!;
         const response = await this.wechatRequest('POST', '/v3/pay/transactions/native', {
-          appid: c.appId, mchid: c.mchId, description: `小鱼 AI · ${order.plan_name}开通协助`, out_trade_no: order.id,
+          appid: c.appId, mchid: c.mchId, description: `xiaoyu AI · ${order.plan_name}开通协助`, out_trade_no: order.id,
           notify_url: `${this.config.origin}${callbackPaths.wechat}`, time_expire: new Date(Date.parse(order.created_at) + 24 * 60 * 60000).toISOString().replace(/\.\d{3}Z$/, '+00:00'),
           amount: { total: order.amount, currency: 'CNY' },
         });
@@ -132,7 +132,7 @@ export class MerchantPayments {
       const url = this.alipay!.pageExecute('alipay.trade.page.pay', 'GET', {
         timestamp: shanghaiDate(new Date()), notifyUrl: `${this.config.origin}${callbackPaths.alipay}`,
         returnUrl: `${this.config.origin}/?payment=success&order=${encodeURIComponent(order.id)}`,
-        bizContent: { outTradeNo: order.id, totalAmount: (order.amount / 100).toFixed(2), subject: `小鱼 AI · ${order.plan_name}开通协助`, productCode: 'FAST_INSTANT_TRADE_PAY', timeoutExpress: '30m' },
+        bizContent: { outTradeNo: order.id, totalAmount: (order.amount / 100).toFixed(2), subject: `xiaoyu AI · ${order.plan_name}开通协助`, productCode: 'FAST_INSTANT_TRADE_PAY', timeoutExpress: '30m' },
       });
       const target = new URL(url);
       if (target.protocol !== 'https:' || target.hostname !== 'openapi.alipay.com') throw new PaymentError('支付宝收银台地址无效。');
@@ -166,6 +166,25 @@ export class MerchantPayments {
     if (!['TRADE_SUCCESS', 'TRADE_FINISHED'].includes(p.trade_status)) return null;
     if (!p.out_trade_no || !p.trade_no) throw new PaymentError('支付宝交易信息缺失。', 400);
     return { channel: 'alipay', orderId: p.out_trade_no, transactionId: p.trade_no, amount: yuanToCents(p.total_amount) };
+  }
+  // Read-only reconciliation. Refunds themselves are initiated in the merchant console.
+  async queryRefund(channel: MerchantChannel, order: PayableOrder, transactionId: string, reference: string) {
+    this.ensure(channel);
+    try {
+      if (channel === 'wechat') {
+        const result = await this.wechatRequest('GET', `/v3/refund/domestic/refunds/${encodeURIComponent(reference)}`);
+        if (result.out_trade_no !== order.id || result.transaction_id !== transactionId || result.out_refund_no !== reference || result.amount?.currency !== 'CNY' || result.amount.total !== order.amount) throw new PaymentError('退款结果与原支付交易不匹配。', 409);
+        if (result.status !== 'SUCCESS') return null;
+        if (!result.refund_id || !Number.isSafeInteger(result.amount.refund)) throw new PaymentError('退款凭据不完整。', 409);
+        return { orderId: order.id, amount: result.amount.refund, reference: `wechat:${result.refund_id}` };
+      }
+      const result = await this.alipay!.exec('alipay.trade.fastpay.refund.query', {
+        timestamp: shanghaiDate(new Date()), bizContent: { outTradeNo: order.id, outRequestNo: reference },
+      }, { validateSign: true });
+      if (result.code !== '10000' || result.refund_status !== 'REFUND_SUCCESS') return null;
+      if (result.out_trade_no !== order.id || result.trade_no !== transactionId || result.out_request_no !== reference || yuanToCents(result.total_amount) !== order.amount) throw new PaymentError('退款结果与原支付交易不匹配。', 409);
+      return { orderId: order.id, amount: yuanToCents(result.refund_amount), reference: `alipay:${transactionId}:${reference}` };
+    } catch (error) { if (error instanceof PaymentError) throw error; throw new PaymentError('退款结果尚无法核实，请稍后查询。'); }
   }
   async query(channel: MerchantChannel, orderId: string): Promise<VerifiedPayment | null> {
     this.ensure(channel);
