@@ -65,6 +65,10 @@ if (existsSync(configPath)) {
   writeFileSync(join(localDir, 'preview-admin.txt'), `XiaoyuAI local preview\nAdmin page: /admin\nPassword: ${password}\nThis is only for the local demo. Keep this file private.\n`, { mode: 0o600, flag: 'wx' });
   writeFileSync(configPath, JSON.stringify(preview, null, 2), { mode: 0o600, flag: 'wx' });
 }
+if (!preview.voucherSecret) {
+  preview.voucherSecret = randomBytes(32).toString('hex');
+  writeFileSync(configPath, JSON.stringify(preview, null, 2), { mode: 0o600 });
+}
 if (installOnly) { console.log('Local preview prepared. No service was started.'); process.exit(0); }
 
 async function choosePort() {
@@ -83,7 +87,7 @@ const origin = `http://127.0.0.1:${port}`;
 const child = spawn(process.execPath, ['--import', 'tsx', join(root, 'server/index.ts')], {
   cwd: root, stdio: ['inherit', 'inherit', 'inherit', 'ipc'], windowsHide: true, detached: process.platform !== 'win32',
   env: { ...childEnvironment, NODE_ENV: 'development', PORT: String(port), BIND_ADDRESS: '127.0.0.1', APP_ORIGIN: origin,
-    PAYMENT_MODE: 'demo', XIAOYUAI_LOCAL_PREVIEW: '1', DATABASE_PATH: join(localDir, 'preview.sqlite'), ADMIN_PASSWORD_HASH: preview.adminPasswordHash,
+    VOUCHER_SECRET: preview.voucherSecret, PAYMENT_MODE: 'demo', XIAOYUAI_LOCAL_PREVIEW: '1', DATABASE_PATH: join(localDir, 'preview.sqlite'), ADMIN_PASSWORD_HASH: preview.adminPasswordHash,
     DATABASE_URL: '', REQUIRE_DATABASE_URL: '', ADMIN_PASSWORD: '', RENDER: 'false', TRUST_PROXY_HOPS: '0' },
 });
 let stopped = false;

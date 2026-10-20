@@ -16,7 +16,7 @@ export const plans = [
   },
 ] as const;
 
-export type OrderStatus = 'pending_payment' | 'paid' | 'processing' | 'completed' | 'cancelled';
+export type OrderStatus = 'pending_payment' | 'paid' | 'processing' | 'completed' | 'cancelled' | 'expired' | 'refund_pending' | 'refunded';
 export const statusLabels: Record<OrderStatus, string> = {
-  pending_payment: '待付款', paid: '已付款', processing: '协助开通中', completed: '已完成', cancelled: '已取消',
+  expired: '已过期', refund_pending: '退款处理中', refunded: '已退款', pending_payment: '待付款', paid: '已付款', processing: '协助开通中', completed: '已完成', cancelled: '已取消',
 };

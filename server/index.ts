@@ -5,7 +5,7 @@ import { runtimeConfig } from './config.js';
 
 async function main() {
   const config = runtimeConfig(process.env);
-  const { app, db } = await createApp({ ...config,
+  const { app, db, compensate } = await createApp({ ...config,
     stripeSecret: process.env.STRIPE_SECRET_KEY, stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET, serveStatic: true,
     merchantPayments: new MerchantPayments(loadMerchantConfig(process.env, config.origin)),
     developmentApiPort: config.port,
@@ -13,11 +13,15 @@ async function main() {
   const server = app.listen(config.port, process.env.BIND_ADDRESS || '0.0.0.0', () => {
     console.log(`xiaoyuai API listening on port ${config.port}; payment mode: ${config.mode}; database: ${db.dialect}`);
   });
+  void compensate().catch(() => console.error('Commerce compensation deferred.'));
+  const compensationTimer = setInterval(() => { void compensate().catch(() => console.error('Commerce compensation deferred.')); }, 60000);
+  compensationTimer.unref();
   const localPreview = process.env.XIAOYUAI_LOCAL_PREVIEW === '1';
   let shuttingDown = false;
   function shutdown() {
     if (shuttingDown) return;
     shuttingDown = true;
+    clearInterval(compensationTimer);
     const deadline = setTimeout(() => { server.closeAllConnections(); process.exit(1); }, 10000);
     deadline.unref();
     server.close(async () => {
@@ -35,6 +39,6 @@ async function main() {
 }
 main().catch(() => {
   // Do not expose connection URLs, passwords or private-key contents in logs.
-  console.error('Startup failed. Check HTTPS origin, administrator configuration, DATABASE_URL, database connectivity and migration permissions.');
+  console.error('Startup failed. Check HTTPS origin, administrator configuration, DATABASE_URL, database connectivity, VOUCHER_SECRET and migration permissions.');
   process.exitCode = 1;
 });

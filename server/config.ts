@@ -21,5 +21,6 @@ export function runtimeConfig(env: NodeJS.ProcessEnv) {
   const trustProxyHops = Number(env.TRUST_PROXY_HOPS || (render ? 1 : 0));
   if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0 || trustProxyHops > 10) throw new Error('TRUST_PROXY_HOPS must be an integer from 0 to 10');
   return { production, mode: mode as 'demo' | 'stripe' | 'merchant', origin, adminPasswordHash, port, trustProxyHops,
+    voucherSecret: env.VOUCHER_SECRET,
     databasePath: env.DATABASE_PATH || './data/xiaoyuai.sqlite', databaseUrl: env.DATABASE_URL };
 }

@@ -1,0 +1,45 @@
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { api, date, type Redemption } from './api';
+import { Busy, ErrorMessage, Modal } from './components';
+const labels: Record<string, string> = { pending: '待处理', processing: '处理中', completed: '已完成', failed: '处理失败', review: '待核查', cancelled: '已取消', available: '待兑换', reserved: '已占用', redeemed: '已兑换', frozen: '已冻结', void: '已作废', expired: '已过期' };
+const next: Record<string, string[]> = { pending: ['processing', 'cancelled'], processing: ['processing', 'completed', 'failed', 'review'], failed: ['pending', 'cancelled'], review: ['review', 'completed', 'failed'], completed: [], cancelled: [] };
+interface Item { id: string; orderId: string; voucherId?: string; redemptionId?: string; ordinal?: number; status: string; statusLabel: string; planName?: string; paymentMode?: string; createdAt?: string; expiresAt?: string; targetEmail?: string; contact?: string; assignee?: string; deliveryReference?: string; events?: { id?: string; action: string; actor?: string; message: string; createdAt: string }[] }
+export default function AdminCommerce() {
+  const [kind, setKind] = useState<'vouchers' | 'redemptions'>('redemptions');
+  const [filters, setFilters] = useState({ search: '', status: '', plan: '', from: '', to: '' }), [page, setPage] = useState(1);
+  const [items, setItems] = useState<Item[]>([]), [total, setTotal] = useState(0), [selected, setSelected] = useState<Item | null>(null);
+  const [error, setError] = useState(''), [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [notice, setNotice] = useState('');
+  const [settings, setSettings] = useState<{ note: string; missing: string[]; voucherReady: boolean } | null>(null);
+  const close = useCallback(() => { setSelected(null); setError(''); }, []);
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
+    try { const params = new URLSearchParams({ ...filters, kind, page: String(page) }); const result = await api<{ items: Item[]; total: number }>(`/admin/commerce?${params}`); setItems(result.items); setTotal(result.total); setSettings(await api('/admin/fulfillment-settings')); }
+    catch (e) { setError((e as Error).message); } finally { setLoading(false); }
+  }, [filters, kind, page]);
+  useEffect(() => { void load(); }, [load]);
+  async function detail(id: string) { setError(''); try { setSelected((await api<{ item: Item }>(`/admin/commerce/${kind}/${id}`)).item); } catch (e) { setError((e as Error).message); } }
+  async function update(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault(); if (!selected || busy) return; setBusy(true); setError(''); const f = new FormData(e.currentTarget);
+    try {
+      if (kind === 'redemptions') {
+        const result = await api<{ redemption: Redemption }>(`/admin/redemptions/${selected.id}`, { status: f.get('status'), expectedStatus: selected.status, note: f.get('note'), assignee: String(f.get('assignee') || ''), deliveryReference: String(f.get('deliveryReference') || ''), confirmed: f.get('confirmed') === 'on' }, 'PATCH');
+        setSelected(result.redemption);
+      } else { await api(`/admin/vouchers/${selected.id}`, { action: f.get('action'), note: f.get('note') }, 'PATCH'); await detail(selected.id); }
+      await load();
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  }
+  return <section className="commerce-workspace" aria-label="卡密与履约管理"><div className="section-heading"><div><div className="eyebrow">VOUCHERS & FULFILLMENT</div><h2>卡密与履约</h2><p>{settings?.note}</p>{settings && !settings.voucherReady && <p role="alert">请配置：{settings.missing.join('、')}</p>}</div><button className="button secondary" disabled={busy} onClick={async () => { setBusy(true); setError(''); try { const r = await api<{ repaired: number; pending: number }>('/admin/vouchers/compensate', {}); setNotice(`本轮补发 ${r.repaired} 笔，待重试 ${r.pending} 笔。`); await load(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }}>补发遗漏卡密</button></div>
+    <div className="filter-tabs">{(['redemptions', 'vouchers'] as const).map(k => <button key={k} className={kind === k ? 'selected' : ''} onClick={() => { setKind(k); setPage(1); setFilters(f => ({ ...f, status: '' })); setSelected(null); }}>{k === 'redemptions' ? '兑换与履约单' : '卡密列表'}</button>)}</div>
+    <form className="commerce-filters" onSubmit={e => { e.preventDefault(); const f = new FormData(e.currentTarget); setFilters({ search: String(f.get('search')), status: String(f.get('status')), plan: String(f.get('plan')), from: String(f.get('from')), to: String(f.get('to')) }); setPage(1); }} key={kind}>
+      <label>编号搜索<input name="search" placeholder="订单号 / 卡密编号 / 兑换编号" maxLength={100} defaultValue={filters.search}/></label><label>状态<select name="status"><option value="">全部状态</option>{(kind === 'vouchers' ? ['available','reserved','redeemed','frozen','void','expired'] : Object.keys(next)).map(s => <option key={s} value={s}>{labels[s]}</option>)}</select></label><label>套餐<select name="plan"><option value="">全部套餐</option><option value="plus-month">Plus 月度</option><option value="plus-quarter">Plus 季度</option><option value="pro-month">Pro 月度</option></select></label><label>起始日期（UTC）<input type="date" name="from"/></label><label>结束日期（UTC）<input type="date" name="to"/></label><button className="button secondary" disabled={loading}>筛选</button>
+    </form>{notice && <p role="status">{notice}</p>}{!selected && <ErrorMessage message={error}/>}
+    {loading ? <Busy label="加载列表"/> : <div className="table-scroll"><table><thead><tr><th>编号 / 订单</th><th>套餐 / 账号</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>{items.map(item => <tr key={item.id}><td><code>{item.id}</code><small>{item.orderId}</small></td><td>{item.planName}<small>{item.targetEmail}{item.ordinal && `第 ${item.ordinal} 张`}{item.paymentMode === 'demo' && <span className="demo-tag">演示</span>}</small></td><td><span className="status-badge">{item.statusLabel}</span></td><td>{item.createdAt && date(item.createdAt)}</td><td><button className="text-link" onClick={() => detail(item.id)}>打开记录</button></td></tr>)}</tbody></table>{items.length === 0 && <div className="empty-state">暂无符合条件的记录</div>}</div>}
+    <div className="pagination"><span>共 {total} 条 · 第 {page} 页</span><div><button className="button secondary small" disabled={page === 1} onClick={() => setPage(p => p - 1)}>上一页</button><button className="button secondary small" disabled={page * 20 >= total} onClick={() => setPage(p => p + 1)}>下一页</button></div></div>
+    {selected && <Modal title={kind === 'redemptions' ? '处理兑换与履约' : '卡密记录'} close={close} wide><span className="status-badge" data-testid="admin-commerce-status">{selected.statusLabel}</span><h3>{selected.planName}</h3><dl className="admin-order-info"><div><dt>记录编号</dt><dd>{selected.id}</dd></div><div><dt>购买订单</dt><dd>{selected.orderId}</dd></div>{selected.voucherId && <div><dt>卡密编号</dt><dd>{selected.voucherId}</dd></div>}{selected.redemptionId && <div><dt>关联兑换单</dt><dd>{selected.redemptionId}</dd></div>}{selected.targetEmail && <><div><dt>目标账号</dt><dd>{selected.targetEmail}</dd></div><div><dt>联系方式</dt><dd>{selected.contact}</dd></div></>}{selected.expiresAt && <div><dt>兑换有效期</dt><dd>{date(selected.expiresAt)}</dd></div>}{selected.deliveryReference && <div><dt>交付凭据</dt><dd>{selected.deliveryReference}</dd></div>}</dl>
+      <ol className="timeline">{selected.events?.map((ev, i) => <li key={ev.id || i}><span className="timeline-dot"/><div><p>{ev.message}</p><small>{date(ev.createdAt)} {ev.actor}</small></div></li>)}</ol>
+      <form className="form-stack" onSubmit={update} key={`${selected.id}-${selected.status}`}>
+      {kind === 'redemptions' && next[selected.status]?.length > 0 ? <><label>履约操作<select name="status">{next[selected.status].map(s => <option key={s} value={s}>{s === 'pending' ? '重试原兑换单' : labels[s]}</option>)}</select></label><label>负责人<input name="assignee" defaultValue={selected.assignee || ''} maxLength={80}/></label><label>交付或核查凭据编号<input name="deliveryReference" defaultValue={selected.deliveryReference || ''} maxLength={160}/></label><label className="checkbox-label"><input type="checkbox" name="confirmed"/><span>我已核实外部结果，凭据可追溯。完成交付或解除待核查状态时必须确认；演示单只记录演示凭据。</span></label></> : kind === 'vouchers' && !selected.redemptionId && ['available','frozen','expired'].includes(selected.status) ? <label>卡密操作<select name="action">{selected.status === 'available' && <option value="freeze">冻结</option>}{selected.status === 'frozen' && <option value="unfreeze">解除冻结</option>}<option value="void">作废</option></select></label> : <p>此记录没有可执行的状态操作。已取消兑换保留权益冻结，需联系售后处理退款。</p>}
+      {(kind === 'redemptions' ? next[selected.status]?.length > 0 : !selected.redemptionId && ['available','frozen','expired'].includes(selected.status)) && <><label>客户可见说明<textarea name="note" required minLength={2} maxLength={500} rows={3}/></label><button className="button primary" disabled={busy}>{busy ? <Busy/> : '保存处理结果'}</button></>}<ErrorMessage message={error}/></form>
+    </Modal>}
+  </section>;
+}

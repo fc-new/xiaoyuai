@@ -213,3 +213,36 @@ test('simultaneous checkout requests cannot reserve different payment channels',
     assert.equal((await f.request('/orders/lookup', receipt)).data.order.paymentChannel, winner);
   } finally { await f.close(); }
 });
+
+test('refund reconciliation checks signed WeChat replies, transaction binding and full amount; never creates a refund', async () => {
+  let reply = { out_trade_no: 'XYREFUND', transaction_id: 'tx-original', out_refund_no: 'refund-request', refund_id: 'wx-refund', status: 'SUCCESS', amount: { total: 16800, refund: 16800, currency: 'CNY' } };
+  let invalid = false;
+  const service = new MerchantPayments(merchantConfig, async (url, init) => {
+    assert.equal(init?.method, 'GET'); assert.match(String(url), /\/v3\/refund\/domestic\/refunds\/refund-request$/);
+    const body = JSON.stringify(reply), headers = wechatHeaders(body);
+    if (invalid) headers['wechatpay-signature'] = 'invalid';
+    return new Response(body, { headers });
+  });
+  const order = { id: 'XYREFUND', amount: 16800, plan_name: 'Plus 月度', created_at: new Date().toISOString() };
+  assert.equal((await service.queryRefund('wechat', order, 'tx-original', 'refund-request'))?.amount, 16800);
+  invalid = true; await assert.rejects(() => service.queryRefund('wechat', order, 'tx-original', 'refund-request'), /签名/); invalid = false;
+  reply = { ...reply, transaction_id: 'wrong-transaction' };
+  await assert.rejects(() => service.queryRefund('wechat', order, 'tx-original', 'refund-request'), /不匹配/);
+  reply = { ...reply, transaction_id: 'tx-original', status: 'PROCESSING' };
+  assert.equal(await service.queryRefund('wechat', order, 'tx-original', 'refund-request'), null);
+});
+
+test('Alipay refund lookup requires signed responses, matching transaction and successful refund status', async () => {
+  const sdk = new AlipaySdk({ appId: merchantConfig.alipay!.appId, privateKey: merchantKeys.privateKey, alipayPublicKey: platformKeys.publicKey, keyType: 'PKCS8', signType: 'RSA2', camelcase: false });
+  let trade = 'ali-trade', status = 'REFUND_SUCCESS';
+  sdk.exec = async (method, params, options) => {
+    assert.equal(method, 'alipay.trade.fastpay.refund.query'); assert.equal(options?.validateSign, true);
+    assert.equal(params?.bizContent?.outRequestNo, 'refund-ref');
+    return { code: '10000', msg: 'Success', out_trade_no: 'XYREFUND', trade_no: trade, out_request_no: 'refund-ref', total_amount: '168.00', refund_amount: '168.00', refund_status: status };
+  };
+  const service = new MerchantPayments(merchantConfig, fetch, sdk);
+  const order = { id: 'XYREFUND', amount: 16800, plan_name: 'Plus 月度', created_at: new Date().toISOString() };
+  assert.equal((await service.queryRefund('alipay', order, trade, 'refund-ref'))?.amount, 16800);
+  trade = 'another'; await assert.rejects(() => service.queryRefund('alipay', order, 'ali-trade', 'refund-ref'), /不匹配/);
+  status = 'WAITING'; assert.equal(await service.queryRefund('alipay', order, trade, 'refund-ref'), null);
+});

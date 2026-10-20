@@ -8,7 +8,7 @@ if (!existsSync('.env')) {
   const password = randomBytes(18).toString('base64url');
   const salt = randomBytes(16).toString('hex');
   const hash = `${salt}:${scryptSync(password, salt, 64).toString('hex')}`;
-  const template = readFileSync('.env.example', 'utf8').replace('ADMIN_PASSWORD_HASH=', `ADMIN_PASSWORD_HASH=${hash}`);
+  const template = readFileSync('.env.example', 'utf8').replace('ADMIN_PASSWORD_HASH=', `ADMIN_PASSWORD_HASH=${hash}`).replace('VOUCHER_SECRET=', `VOUCHER_SECRET=${randomBytes(32).toString('hex')}`);
   writeFileSync('.env', template, { mode: 0o600, flag: 'wx' });
   writeFileSync('.local/admin-credentials.txt', `Administrator login: /admin\nPassword: ${password}\nKeep this file private. This password is not a payment credential.\n`, { mode: 0o600, flag: 'wx' });
   console.log('Created local configuration. Administrator credentials are in .local/admin-credentials.txt (not printed).');

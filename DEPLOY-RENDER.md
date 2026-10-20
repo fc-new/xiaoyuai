@@ -20,10 +20,11 @@
 
 也可以在 Render 选择 **New → Blueprint**，选择此仓库的 `main` 分支。私有仓库必须先授权 Render GitHub App 访问。
 
-创建前确认只有一个 **Free Web Service**，没有付费数据库、磁盘或其他付费资源。Blueprint 会提示填写两个私有变量：
+创建前确认只有一个 **Free Web Service**，没有付费数据库、磁盘或其他付费资源。Blueprint 会提示填写三个私有变量：
 
 | 名称 | 填写内容 |
 | --- | --- |
+| `VOUCHER_SECRET` | 32 随机字节编码为 64 位十六进制，首次生成后保留并安全备份；不要每次部署重置 |
 | `DATABASE_URL` | Neon 的池化连接字符串 |
 | `ADMIN_PASSWORD` | 你自行生成并保存的 16–256 位高强度管理密码；推荐密码管理器生成随机密码 |
 
@@ -44,7 +45,7 @@
 | `PAYMENT_MODE` | `demo` |
 | `REQUIRE_DATABASE_URL` | `1` |
 | `TRUST_PROXY_HOPS` | `1` |
-| `DATABASE_URL` / `ADMIN_PASSWORD` | 上表中的私有值 |
+| `DATABASE_URL` / `ADMIN_PASSWORD` / `VOUCHER_SECRET` | 上表中的私有值 |
 
 ## 3. 打开与验证
 
@@ -52,9 +53,10 @@ Render 状态变成 **Live** 后，使用它实际显示的 `https://…onrender
 
 1. 打开首页，确认有三个套餐并有演示说明。
 2. 用测试邮箱创建订单，保存订单号和查询码，完成模拟付款。
-3. 打开该网址的 `/admin`，用你设置的管理密码登录，按顺序处理为开通中、已完成，再查订单时间线。
-4. 在 Render 执行一次重新部署，用原查询码确认订单仍然存在。
-5. `/api/health` 应返回 `status=ok`、`database=ok`、`databaseType=postgres`、`paymentMode=demo`。
+3. 在订单中查看并复制卡密，打开 `/redeem` 核对目标邮箱后提交，保存兑换编号和查询码。
+4. 打开 `/admin`，在兑换与履约单中填写负责人、开始处理，再填写演示交付凭据并确认完成；前往 `/redeem` 查询履约时间线。
+5. 在 Render 执行一次重新部署，用原查询码确认订单仍然存在。
+6. `/api/health` 应返回 `status=ok`、`database=ok`、`databaseType=postgres`、`paymentMode=demo`。
 
 不要用真实客户资料测试。免费实例休眠后首次打开可能较慢；连接数据库失败时，健康检查会失败，应用不会悄悄使用临时 SQLite。查看 Render 和 Neon 的状态、连接字符串、数据库角色权限及区域设置。
 
@@ -64,8 +66,12 @@ Render 状态变成 **Live** 后，使用它实际显示的 `https://…onrender
 
 如绑定自定义域名，将 `APP_ORIGIN` 设置为该域名的完整 HTTPS 来源，然后重新部署。更换管理密码后，可在专用数据库执行 `DELETE FROM admin_sessions` 撤销既有会话。进程内限流仍要求单个 Web Service；本配置不承诺免费服务可用于持续稳定的正式收款。
 
-原有本地 SQLite 数据不会自动迁入 Neon。这次部署使用新数据库；如本地已有真实订单，应单独备份并安排导入。
+原有本地 SQLite 数据不会自动迁入 Neon。现有服务升级应继续使用原 Neon 数据库；如本地已有真实订单，应单独备份并安排导入。
 
 ## 开发验证
 
 `npm test` 验证 SQLite。对本机一次性 PostgreSQL 实例，可使用 `TEST_DATABASE_URL=postgresql://…@127.0.0.1:5432/… npm test` 复用整套 API／支付测试。测试只接受回环地址，并为每个夹具建立独立临时 schema；不要提供正式数据库地址。GitHub Actions 同时配置 SQLite 和 PostgreSQL 两套验证。
+
+## 现有服务升级
+
+先阅读 [迁移和回滚手册](docs/RELEASE.md)。保留现有数据库和管理员配置，只补充新的卡密密钥；不要重新创建生产数据库。新增表自动迁移，旧订单不生成卡密。先完成分支审查和预览，再发布经过测试的提交。

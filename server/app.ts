@@ -11,6 +11,10 @@ import { openStore } from './store.js';
 import { plans, statusLabels, type OrderStatus } from './catalog.js';
 import { loadMerchantConfig, MerchantPayments, PaymentError, type MerchantChannel, type VerifiedPayment } from './merchant.js';
 import { allowedOrigins } from './origins.js';
+import { migrateCommerce } from './migrations.js';
+import { VoucherVault } from './vouchers.js';
+import { commerceService } from './commerce.js';
+import { HttpError } from './http.js';
 
 export interface Config {
   databasePath: string; origin: string; mode: 'demo' | 'stripe' | 'merchant'; adminPasswordHash: string;
@@ -19,13 +23,23 @@ export interface Config {
   developmentApiPort?: number;
   databaseUrl?: string;
   trustProxyHops?: number;
+  voucherSecret?: string;
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const now = () => new Date().toISOString();
-class HttpError extends Error { constructor(public status: number, message: string) { super(message); } }
+
 
 export async function createApp(config: Config) {
   const db = await openStore({ path: config.databasePath, url: config.databaseUrl, production: config.production });
+  let vault: VoucherVault | null = null;
+  try {
+    await migrateCommerce(db);
+    vault = config.voucherSecret ? new VoucherVault(config.voucherSecret) : null;
+    if (vault) await vault.verifyKey(db);
+  } catch (error) { await db.close(); throw error; }
+  const commerce = commerceService(db, vault, config.mode);
+  // A failure to issue never erases a confirmed payment. The persistent queue retries it.
+  const deliver = async (id: string) => { try { await commerce.issue(id); } catch { console.error('Voucher issuance deferred; compensation will retry.'); } };
   const app = express();
   if (config.trustProxyHops) app.set('trust proxy', config.trustProxyHops);
   const stripe = config.mode === 'stripe' && config.stripeSecret ? new Stripe(config.stripeSecret, { maxNetworkRetries: 2, timeout: 15000 }) : null;
@@ -43,6 +57,7 @@ export async function createApp(config: Config) {
   const addEvent = (id: string, status: string, message: string, store = db) => store.prepare('INSERT INTO order_events(order_id,status,message,created_at) VALUES(?,?,?,?)').run(id, status, message, now());
   const merchantPayment = (id: string, store = db) => store.prepare('SELECT * FROM merchant_payments WHERE order_id=?').get<{ channel: MerchantChannel; transaction_id: string | null; qr_code: string | null }>(id);
   const serialize = async (row: OrderRow) => ({
+    ...await commerce.summary(row.id),
     id: row.id, email: row.email, contact: row.contact, planId: row.plan_id, planName: row.plan_name,
     amount: row.amount, currency: row.currency, status: row.status, statusLabel: statusLabels[row.status],
     paymentMode: row.payment_mode, createdAt: row.created_at, updatedAt: row.updated_at,
@@ -50,18 +65,18 @@ export async function createApp(config: Config) {
     events: await db.prepare('SELECT id,status,message,created_at AS "createdAt" FROM order_events WHERE order_id=? ORDER BY id').all(row.id),
   });
 
-  const confirmMerchantPayment = (payment: VerifiedPayment) => db.transaction(async tx => {
+  const confirmMerchantPayment = async (payment: VerifiedPayment) => { await db.transaction(async tx => {
     const row = await tx.lockOrder(payment.orderId);
     const stored = row && await merchantPayment(row.id, tx);
     if (!row || row.payment_mode !== 'merchant' || !stored || stored.channel !== payment.channel || row.amount !== payment.amount || row.currency !== 'cny') throw new PaymentError('支付结果与订单金额或渠道不匹配。', 400);
     if (stored.transaction_id && stored.transaction_id !== payment.transactionId) throw new PaymentError('订单已有其他付款记录，请由运营核实。', 409);
-    if (row.status === 'cancelled') throw new PaymentError('已取消订单收到付款，请由运营核实。', 409);
+    if (['cancelled', 'expired'].includes(row.status)) throw new PaymentError('已取消订单收到付款，请由运营核实。', 409);
     await tx.prepare('UPDATE merchant_payments SET transaction_id=? WHERE order_id=?').run(payment.transactionId, row.id);
     if (row.status === 'pending_payment') {
       await tx.prepare('UPDATE orders SET status=?,updated_at=? WHERE id=?').run('paid', now(), row.id);
-      await addEvent(row.id, 'paid', `${payment.channel === 'wechat' ? '微信支付' : '支付宝'}付款已确认，等待专人联系并核实开通条件。`, tx);
+      await addEvent(row.id, 'paid', `${payment.channel === 'wechat' ? '微信支付' : '支付宝'}付款已确认，卡密订单将自动发码；旧订单继续等待专人联系。`, tx);
     }
-  });
+  }); await deliver(payment.orderId); };
 
   // Official merchant callbacks authenticate themselves; they do not use browser Origin/CSRF cookies.
   app.post('/api/payments/wechat/notify', express.raw({ type: 'application/json', limit: '64kb' }), async (req, res) => {
@@ -104,11 +119,15 @@ export async function createApp(config: Config) {
             }
             if (row.status === 'pending_payment') {
               await tx.prepare('UPDATE orders SET status=?,updated_at=? WHERE id=?').run('paid', now(), row.id);
-              await addEvent(row.id, 'paid', '付款已确认，等待专人联系并核实开通条件。', tx);
+              await addEvent(row.id, 'paid', '付款已确认，卡密订单将自动发码；旧订单继续等待专人联系。', tx);
             }
           }
         }
       });
+      if (['checkout.session.completed', 'checkout.session.async_payment_succeeded'].includes(event.type)) {
+        const session = event.data.object as Stripe.Checkout.Session;
+        if (session.metadata?.orderId) await deliver(session.metadata.orderId);
+      }
       res.json({ received: true });
     } catch (error) {
       console.error('Webhook processing failed:', error instanceof Error ? error.message : 'unknown error');
@@ -126,22 +145,25 @@ export async function createApp(config: Config) {
   });
   app.get('/api/health', async (_req, res) => {
     await db.prepare('SELECT 1').get();
-    res.json({ status: 'ok', database: 'ok', databaseType: db.dialect, paymentMode: config.mode, paymentReady });
+    res.json({ status: 'ok', database: 'ok', databaseType: db.dialect, paymentMode: config.mode,
+      paymentReady, voucherReady: Boolean(vault) });
   });
-  app.get('/api/catalog', (_req, res) => res.json({ plans, paymentMode: config.mode, paymentReady, paymentChannels: config.mode === 'merchant' ? merchant.channels : [], currency: 'CNY' }));
+  app.get('/api/catalog', (_req, res) => res.json({ plans, paymentMode: config.mode, paymentReady: paymentReady && Boolean(vault), voucherReady: Boolean(vault), maxQuantity: 10, voucherValidityDays: 365, paymentChannels: config.mode === 'merchant' ? merchant.channels : [], currency: 'CNY' }));
 
   const createLimit = rateLimit({ windowMs: 15 * 60000, limit: 15, message: { error: '创建订单过于频繁，请稍后再试。' } });
   app.post('/api/orders', createLimit, async (req, res) => {
-    const input = z.object({ planId: z.string(), email: z.email().max(254), contact: z.string().trim().min(2).max(100), consent: z.literal(true) }).parse(req.body);
+    const input = z.object({ planId: z.string(), email: z.email().max(254), contact: z.string().trim().min(2).max(100), consent: z.literal(true), quantity: z.number().int().min(1).max(10).default(1) }).parse(req.body);
     const plan = plans.find(p => p.id === input.planId);
     if (!plan) throw new HttpError(400, '套餐不存在，请重新选择。');
+    if (!vault) throw new HttpError(503, '卡密服务尚未配置，请稍后购买。');
     if (!paymentReady) throw new HttpError(503, '收款配置尚未完成，暂时不能创建订单。');
     const id = `XY${new Date().toISOString().slice(0, 10).replaceAll('-', '')}${randomBytes(5).toString('hex').toUpperCase()}`;
     const accessCode = randomBytes(8).toString('hex').toUpperCase();
     const time = now();
     await db.transaction(async tx => {
       await tx.prepare('INSERT INTO orders(id,access_hash,email,contact,plan_id,plan_name,amount,payment_mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
-        .run(id, hash(accessCode), input.email.toLowerCase(), input.contact, plan.id, plan.name, plan.price, config.mode, time, time);
+        .run(id, hash(accessCode), input.email.toLowerCase(), input.contact, plan.id, plan.name, plan.price * input.quantity, config.mode, time, time);
+      await tx.prepare('INSERT INTO purchase_orders(order_id,quantity,unit_price,service_period,validity_days,created_at) VALUES(?,?,?,?,?,?)').run(id, input.quantity, plan.price, plan.period, 365, time);
       await addEvent(id, 'pending_payment', config.mode === 'demo' ? '演示订单已创建，模拟付款不会扣款，也不会实际开通订阅。' : '订单已创建，请完成付款。', tx);
     });
     res.status(201).json({ order: await serialize((await getOrder(id))!), accessCode });
@@ -198,7 +220,7 @@ export async function createApp(config: Config) {
     const session = await stripe.checkout.sessions.create({
       mode: 'payment', payment_method_types: ['card'], customer_email: row.email,
       client_reference_id: row.id, metadata: { orderId: row.id },
-      line_items: [{ quantity: 1, price_data: { currency: row.currency, unit_amount: row.amount, product_data: { name: `小鱼 AI · ${row.plan_name}开通协助` } } }],
+      line_items: [{ quantity: 1, price_data: { currency: row.currency, unit_amount: row.amount, product_data: { name: `xiaoyu AI · ${row.plan_name}开通协助` } } }],
       success_url: `${origin}/?payment=success&order=${encodeURIComponent(row.id)}`,
       cancel_url: `${origin}/?payment=cancelled&order=${encodeURIComponent(row.id)}`,
     }, { idempotencyKey: `${row.id}-attempt-${attempt}` });
@@ -212,9 +234,11 @@ export async function createApp(config: Config) {
     await db.transaction(async tx => {
       const current = await tx.lockOrder(row.id);
       if (current?.status !== 'pending_payment') throw new HttpError(409, '订单已付款或已取消。');
+      if (Date.now() - Date.parse(current.created_at) > 86400000) throw new HttpError(409, '订单已过期，请重新下单。');
       await tx.prepare('UPDATE orders SET status=?,updated_at=? WHERE id=?').run('paid', now(), row.id);
       await addEvent(row.id, 'paid', '模拟付款成功（未实际扣款）。等待管理员演示处理。', tx);
     });
+    await deliver(row.id);
     res.json({ order: await serialize((await getOrder(row.id))!) });
   });
   app.post('/api/orders/payment-status', rateLimit({ windowMs: 60000, limit: 20, message: { error: '查询过于频繁，请稍后刷新。' } }), async (req, res) => {
@@ -226,6 +250,8 @@ export async function createApp(config: Config) {
     }
     res.json({ order: await serialize((await getOrder(row.id))!) });
   });
+
+  commerce.publicRoutes(app, authenticateOrder);
 
   const adminAuth = async (req: Request, _res: Response, next: NextFunction) => {
     const token = req.headers.cookie?.split(';').map(v => v.trim()).find(v => v.startsWith('xy_admin='))?.slice(9);
@@ -246,6 +272,22 @@ export async function createApp(config: Config) {
     res.json({ ok: true });
   });
   app.use('/api/admin', adminAuth);
+  commerce.adminRoutes(app, async (order, reference) => {
+    if (order.payment_mode === 'merchant') {
+      const stored = await merchantPayment(order.id);
+      if (!stored?.transaction_id) throw new HttpError(409, '缺少原支付交易号。');
+      return merchant.queryRefund(stored.channel, order, stored.transaction_id, reference);
+    }
+    if (order.payment_mode === 'stripe' && stripe && order.stripe_session) {
+      const session = await stripe.checkout.sessions.retrieve(order.stripe_session);
+      const refund = await stripe.refunds.retrieve(reference);
+      if (refund.status !== 'succeeded') return null;
+      const intent = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+      if (!intent || refund.payment_intent !== intent || refund.currency !== order.currency) throw new HttpError(409, '退款交易与原订单不匹配。');
+      return { orderId: order.id, amount: refund.amount, reference: `stripe:${refund.id}` };
+    }
+    throw new HttpError(503, '对应退款查询通道不可用，权益将保持冻结。');
+  });
   app.get('/api/admin/payment-settings', (_req, res) => res.json({ mode: config.mode, ready: paymentReady,
     channels: merchant.config.statuses, verification: 'configuration-only',
     note: '配置齐全仅代表可发起真实支付；商户签约、回调公网可达性与真实到账仍需联调验证。' }));
@@ -259,14 +301,17 @@ export async function createApp(config: Config) {
     const status = typeof req.query.status === 'string' ? req.query.status : '';
     const search = typeof req.query.search === 'string' ? req.query.search.slice(0, 100).trim() : '';
     const page = Math.max(1, Math.min(10000, Math.floor(Number(req.query.page) || 1)));
-    const where = `WHERE (?='' OR status=?) AND (?='' OR lower(id) LIKE ? ESCAPE '!' OR lower(email) LIKE ? ESCAPE '!')`;
+    const filter = z.object({ plan: z.string().max(40).default(''), from: z.string().default(''), to: z.string().default('') }).parse(req.query);
+    const since = filter.from ? z.iso.date().parse(filter.from) + 'T00:00:00.000Z' : '';
+    const until = filter.to ? z.iso.date().parse(filter.to) + 'T23:59:59.999Z' : '';
+    const where = `WHERE (?='' OR status=?) AND (?='' OR lower(id) LIKE ? ESCAPE '!' OR lower(email) LIKE ? ESCAPE '!') AND (?='' OR plan_id=?) AND (?='' OR created_at>=?) AND (?='' OR created_at<=?)`;
     const pattern = `%${search.toLowerCase().replace(/[!%_]/g, '!$&')}%`;
-    const args = [status, status, search, pattern, pattern];
+    const args = [status, status, search, pattern, pattern, filter.plan, filter.plan, since, since, until, until];
     const rows = await db.prepare(`SELECT * FROM orders ${where} ORDER BY created_at DESC LIMIT 20 OFFSET ?`).all<OrderRow>(...args, (page - 1) * 20);
     const total = Number((await db.prepare(`SELECT COUNT(*) AS count FROM orders ${where}`).get(...args))!.count);
     const rawStats = (await db.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END) AS waiting,
       SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) AS processing,
-      COALESCE(SUM(CASE WHEN payment_mode IN ('stripe','merchant') AND status IN ('paid','processing','completed') THEN amount ELSE 0 END),0) AS revenue FROM orders`).get())!;
+      COALESCE(SUM(CASE WHEN payment_mode IN ('stripe','merchant') AND status IN ('paid','processing','completed','refund_pending') THEN amount ELSE 0 END),0) AS revenue FROM orders`).get())!;
     const stats = Object.fromEntries(Object.entries(rawStats).map(([key, value]) => [key, Number(value || 0)]));
     res.json({ orders: await Promise.all(rows.map(serialize)), total, page, stats });
   });
@@ -276,7 +321,8 @@ export async function createApp(config: Config) {
     await db.transaction(async tx => {
       const row = await tx.lockOrder(id);
       if (!row) throw new HttpError(404, '订单不存在。');
-      const transitions: Record<OrderStatus, string[]> = { pending_payment: ['cancelled'], paid: ['processing'], processing: ['processing', 'completed'], completed: [], cancelled: [] };
+      if (await commerce.purchase(row.id, tx) && input.status !== 'cancelled') throw new HttpError(409, '请在兑换单中处理履约，支付订单不能直接完成开通。');
+      const transitions: Record<OrderStatus, string[]> = { pending_payment: ['cancelled'], paid: ['processing'], processing: ['processing', 'completed'], completed: [], cancelled: [], expired: [], refund_pending: [], refunded: [] };
       if (!transitions[row.status].includes(input.status)) throw new HttpError(409, '当前状态不允许此操作，请刷新订单。');
       if (input.status === 'cancelled' && (row.stripe_session || row.payment_attempt > 0 || await merchantPayment(row.id, tx))) throw new HttpError(409, '已发起支付会话的订单不能直接取消，请先在支付服务商后台处理。');
       await tx.prepare('UPDATE orders SET status=?,updated_at=? WHERE id=?').run(input.status, now(), row.id);
@@ -295,8 +341,8 @@ export async function createApp(config: Config) {
     if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
     if (error instanceof PaymentError) { res.status(error.status).json({ error: error.message }); return; }
     if (error instanceof SyntaxError && 'body' in error) { res.status(400).json({ error: '请求格式不正确。' }); return; }
-    console.error('Request failed:', error instanceof Error ? error.message : 'unknown error');
+    console.error('Request failed; sensitive request and database details suppressed.');
     res.status(500).json({ error: '服务暂时不可用，请稍后重试。' });
   });
-  return { app, db };
+  return { app, db, compensate: commerce.compensate };
 }
