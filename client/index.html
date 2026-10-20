@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#163f35" />
+    <meta name="description" content="小鱼 AI · 让灵感，自由发生。清晰的套餐、透明的进度，为你的 AI 日常提供人工开通协助。" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/startup.css" />
+    <title>小鱼 AI · 让灵感，自由发生</title>
+  </head>
+  <body>
+    <div id="root"><main class="startup-shell" id="app-startup" role="status">
+      <img src="/favicon.svg" alt="小鱼 AI" />
+      <span class="startup-loading-mark" aria-hidden="true"></span>
+      <h1 data-startup-title>正在打开灵感空间…</h1>
+      <p data-startup-description>首次加载可能需要几秒，请稍候。</p>
+      <div data-startup-recovery hidden><button type="button" id="startup-reload">重新加载页面</button></div>
+      <noscript><p>请在浏览器中启用 JavaScript 后重新加载页面。</p></noscript>
+    </main></div>
+    <script defer src="/startup.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
