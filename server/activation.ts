@@ -4,6 +4,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 import { z } from 'zod';
 import { plans } from './catalog.js';
 import type { Store } from './store.js';
+import { MAX_SESSION_CHARACTERS, SESSION_LENGTH_ERROR } from '../shared/session-limits.js';
 
 export class ActivationError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -13,6 +14,7 @@ const now = () => new Date().toISOString();
 const normalize = (value: string) => value.toUpperCase().replace(/[\s-]/g, '');
 const codeInput = z.string().trim().max(120).refine(value => /^[A-Z0-9]{12,96}$/.test(normalize(value)));
 const receiptInput = z.object({ id: z.string().max(64), accessCode: z.string().regex(/^[a-f0-9]{32,64}$/) });
+const sessionInput = z.string().min(1).max(MAX_SESSION_CHARACTERS);
 const labels: Record<string, string> = { queued: '排队待处理', processing: '正在处理', needs_session: '请更新 session', needs_review: '待核实', completed: '已完成', failed: '未完成' };
 interface Card { id: string; code_hash: string; code_suffix: string; plan_id: string; status: string; is_demo: number; source: string; expires_at: string | null; created_at: string }
 interface Job { id: string; code_id: string; access_hash: string; account_email: string; status: string; session_ciphertext: string | null; session_expires_at: string | null; delivery_reference: string | null; created_at: string; updated_at: string; completed_at: string | null }
@@ -63,7 +65,7 @@ export async function registerActivations(app: Express, db: Store, options: {
     }
     let session: unknown;
     try { session = JSON.parse(value); } catch { throw new ActivationError(400, '请粘贴完整的 session JSON。'); }
-    const parsed = z.object({ accessToken: z.string().min(50).max(16000), expires: z.iso.datetime({ offset: true }), user: z.object({ email: z.email().max(254) }) }).safeParse(session);
+    const parsed = z.object({ accessToken: z.string().min(50).max(MAX_SESSION_CHARACTERS), expires: z.iso.datetime({ offset: true }), user: z.object({ email: z.email().max(254) }) }).safeParse(session);
     if (!parsed.success || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(parsed.data.accessToken)) throw new ActivationError(400, 'session 格式不正确，需要包含 accessToken、expires 和账号邮箱。');
     const expires = Date.parse(parsed.data.expires);
     if (expires < Date.now() + 60000) throw new ActivationError(400, 'session 已过期或即将过期，请重新获取。');
@@ -81,7 +83,7 @@ export async function registerActivations(app: Express, db: Store, options: {
   app.use(['/api/activation', '/api/admin/activation'], async (_req, _res, next) => { try { await purge(); next(); } catch { next(new ActivationError(503, '暂时无法读取兑换状态，请稍后重试。')); } });
   const limit = rateLimit({ windowMs: 15 * 60000, limit: 60, message: { error: '请求较多，请稍后再试。' } });
   app.use('/api/activation', limit);
-  app.get('/api/activation/config', (_req, res) => res.json({ brand: 'xiaoyu AI', workflow: 'external-code-session-v1', plans: plans.map(p => ({ id: p.id, name: p.name })), sessionRetentionMinutes: 30, fulfillmentMode: 'operator', purchaseEnabled: false }));
+  app.get('/api/activation/config', (_req, res) => res.json({ brand: 'xiaoyu AI', workflow: 'external-code-session-v1', plans: plans.map(p => ({ id: p.id, name: p.name })), sessionRetentionMinutes: 30, maxSessionCharacters: MAX_SESSION_CHARACTERS, fulfillmentMode: 'operator', purchaseEnabled: false }));
   const findCode = async (code: string) => {
     const card = await db.prepare('SELECT * FROM activation_codes WHERE code_hash=?').get<Card>(hash(normalize(code)));
     if (!card) throw new ActivationError(404, '卡密不存在，请确认已由商家导入本站。');
@@ -108,7 +110,8 @@ export async function registerActivations(app: Express, db: Store, options: {
     return job;
   };
   app.post('/api/activation/redeem', async (req, res) => {
-    const input = z.object({ code: codeInput, session: z.string().min(1).max(32768), consent: z.literal(true), requestKey: z.string().regex(/^[a-f0-9]{32,64}$/) }).strict().parse(req.body);
+    if (typeof req.body?.session === 'string' && req.body.session.length > MAX_SESSION_CHARACTERS) throw new ActivationError(413, SESSION_LENGTH_ERROR);
+    const input = z.object({ code: codeInput, session: sessionInput, consent: z.literal(true), requestKey: z.string().regex(/^[a-f0-9]{32,64}$/) }).strict().parse(req.body);
     const card = await findCode(input.code);
     // Authenticate a retry before parsing its session, which may have expired since submission.
     const previous = await db.prepare('SELECT * FROM activation_jobs WHERE code_id=?').get<Job>(card.id);
@@ -132,7 +135,8 @@ export async function registerActivations(app: Express, db: Store, options: {
   });
   app.post('/api/activation/lookup', async (req, res) => res.json({ job: await serializeJob(await authorize(req.body)) }));
   app.post('/api/activation/session', async (req, res) => {
-    const input = receiptInput.extend({ session: z.string().min(1).max(32768), consent: z.literal(true) }).strict().parse(req.body);
+    if (typeof req.body?.session === 'string' && req.body.session.length > MAX_SESSION_CHARACTERS) throw new ActivationError(413, SESSION_LENGTH_ERROR);
+    const input = receiptInput.extend({ session: sessionInput, consent: z.literal(true) }).strict().parse(req.body);
     const authorized = await authorize(input);
     const card = (await getCard(authorized.code_id))!;
     const session = parseSession(input.session, Boolean(card.is_demo));

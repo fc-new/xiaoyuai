@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowRight, ArrowUpRight, Check, Copy, ExternalLink, KeyRound, LockKeyhole, RefreshCw, Search, ShieldCheck, Sparkles, Ticket, Trash2, X } from 'lucide-react';
 import { api, date } from './api';
+import { MAX_SESSION_CHARACTERS, SESSION_LENGTH_ERROR } from '../../shared/session-limits';
 import { Busy, ErrorMessage, Logo, Modal } from './components';
 
 export interface ActivationJob {
@@ -21,6 +22,7 @@ function getAttemptKey() {
 export default function App() {
   const [code, setCode] = useState('');
   const [session, setSession] = useState('');
+  const [updatedSession, setUpdatedSession] = useState('');
   const [checked, setChecked] = useState<CheckedCode | null>(null);
   const [job, setJob] = useState<ActivationJob | null>(null);
   const [receipt, setReceipt] = useState<Receipt | null>(readReceipt);
@@ -49,6 +51,7 @@ export default function App() {
   }
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault(); if (busy || !checked?.redeemable) return;
+    if (session.length > MAX_SESSION_CHARACTERS) { setError(SESSION_LENGTH_ERROR); return; }
     setBusy(true); setError(''); setNotice('');
     const consent = new FormData(e.currentTarget).get('consent') === 'on';
     try {
@@ -79,11 +82,13 @@ export default function App() {
     catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   async function updateSession(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault(); if (!receipt) return; setBusy(true); setError('');
+    e.preventDefault(); if (!receipt) return;
+    if (updatedSession.length > MAX_SESSION_CHARACTERS) { setError(SESSION_LENGTH_ERROR); return; }
+    setBusy(true); setError('');
     const form = new FormData(e.currentTarget);
     try {
       const result = await api<{ job: ActivationJob }>('/activation/session', { ...receipt, session: form.get('session'), consent: form.get('consent') === 'on' });
-      setJob(result.job); updateForm.current?.reset(); setShowUpdate(false); setNotice('session 已更新，等待继续处理。');
+      setJob(result.job); updateForm.current?.reset(); setUpdatedSession(''); setShowUpdate(false); setNotice('session 已更新，等待继续处理。');
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   return <>
@@ -104,19 +109,19 @@ export default function App() {
           {job.deliveryReference && <div className="delivery-reference"><ShieldCheck size={18}/><div><small>交付凭据编号</small><strong>{job.deliveryReference}</strong></div></div>}
           {job.sessionAvailable && <div className="session-meta"><LockKeyhole size={15}/><span>临时 session 保存至 {job.sessionExpiresAt && date(job.sessionExpiresAt)}</span><button onClick={deleteSession} disabled={busy} aria-label="删除临时 session"><Trash2 size={14}/>删除</button></div>}
           {notice && <p className="success-message" role="status">{notice}</p>}<ErrorMessage message={error}/>
-          <div className="job-buttons"><button className="button secondary" disabled={busy} onClick={() => receipt && lookup(receipt)}><RefreshCw size={15}/>刷新进度</button>{!['completed', 'failed'].includes(job.status) && <button className="button primary" onClick={() => setShowUpdate(!showUpdate)}>更新 session<ArrowRight size={16}/></button>}</div>
-          {showUpdate && <form className="form-stack update-session-form" ref={updateForm} onSubmit={updateSession}><label>更新 session<textarea name="session" required rows={5} maxLength={32768} autoComplete="off" spellCheck={false} placeholder={job.isDemo ? 'DEMO_SESSION' : '粘贴原账号最新的 session JSON'}/></label><label className="checkbox-label"><input type="checkbox" name="consent" required/><span>我再次授权本站运营方仅为本次开通使用此临时凭据，最多可使用 30 分钟，过期后禁止读取并清理。</span></label><button className="button primary full" disabled={busy}>{busy ? <Busy/> : '提交更新'}</button></form>}
+          <div className="job-buttons"><button className="button secondary" disabled={busy} onClick={() => receipt && lookup(receipt)}><RefreshCw size={15}/>刷新进度</button>{!['completed', 'failed'].includes(job.status) && <button className="button primary" onClick={() => { setUpdatedSession(''); setShowUpdate(!showUpdate); }}>更新 session<ArrowRight size={16}/></button>}</div>
+          {showUpdate && <form className="form-stack update-session-form" ref={updateForm} onSubmit={updateSession}><label>更新 session<textarea name="session" value={updatedSession} onChange={e => setUpdatedSession(e.target.value)} required rows={5} autoComplete="off" spellCheck={false} placeholder={job.isDemo ? 'DEMO_SESSION' : '粘贴原账号最新的 session JSON'}/></label><p className="session-length-hint" aria-live="polite">{updatedSession.length.toLocaleString()} / {MAX_SESSION_CHARACTERS.toLocaleString()} 字符 · 完整粘贴，不截断</p>{updatedSession.length > MAX_SESSION_CHARACTERS && <ErrorMessage message={SESSION_LENGTH_ERROR}/>}<label className="checkbox-label"><input type="checkbox" name="consent" required/><span>我再次授权本站运营方仅为本次开通使用此临时凭据，最多可使用 30 分钟，过期后禁止读取并清理。</span></label><button className="button primary full" disabled={busy || updatedSession.length > MAX_SESSION_CHARACTERS}>{busy ? <Busy/> : '提交更新'}</button></form>}
           <button className="text-link another-code" onClick={() => { setJob(null); setError(''); setNotice(''); setShowUpdate(false); const key = crypto.randomUUID().replaceAll('-', ''); setAttemptKey(key); try { sessionStorage.setItem('xy-activation-request', key); } catch { /* Keep in memory. */ } }}>兑换另一张卡密<ArrowUpRight size={15}/></button>
         </> : <>
           <div className="panel-eyebrow"><span>START YOUR NEXT CHAPTER</span><span>01 — 02</span></div><h2>兑换你的服务卡密</h2><p className="panel-description">只需两项信息，提交后即可查询处理进度。</p>
           <form className="form-stack activation-form" onSubmit={submit}>
             <label><span className="field-heading"><span><i>01</i>兑换卡密</span><Ticket size={17}/></span><div className="code-input-row"><input name="code" value={code} onChange={e => { setCode(e.target.value); setChecked(null); setSession(''); }} placeholder="输入商家提供的完整卡密" required minLength={12} maxLength={120} autoComplete="off" spellCheck={false}/><button type="button" className="button secondary" onClick={checkCode} disabled={busy || code.trim().length < 12}>{busy ? <Busy label="校验"/> : '校验卡密'}</button></div></label>
             {checked?.redeemable && <div className="code-verified" role="status"><Check size={16}/><span>{checked.planName}<small>{checked.isDemo ? '演示卡密 · 请使用演示 session' : '卡密可兑换 · 账号有效性将在履约时核实'}</small></span></div>}
-            <label><span className="field-heading"><span><i>02</i>账号 session</span><LockKeyhole size={17}/></span><textarea name="session" value={session} onChange={e => setSession(e.target.value)} required rows={6} maxLength={32768} disabled={!checked?.redeemable} placeholder={checked?.isDemo ? '点击下方按钮填入演示 session' : '粘贴完整的 session JSON，仅用于本次授权开通'} autoComplete="off" autoCorrect="off" spellCheck={false}/></label>
+            <label><span className="field-heading"><span><i>02</i>账号 session</span><LockKeyhole size={17}/></span><textarea name="session" value={session} onChange={e => setSession(e.target.value)} required rows={6} disabled={!checked?.redeemable} placeholder={checked?.isDemo ? '点击下方按钮填入演示 session' : '粘贴完整的 session JSON，仅用于本次授权开通'} autoComplete="off" autoCorrect="off" spellCheck={false}/></label><p className="session-length-hint" aria-live="polite">{session.length.toLocaleString()} / {MAX_SESSION_CHARACTERS.toLocaleString()} 字符 · 完整粘贴，不截断</p>{session.length > MAX_SESSION_CHARACTERS && <ErrorMessage message={SESSION_LENGTH_ERROR}/>}
             {checked?.isDemo ? <button type="button" className="text-link demo-fill" onClick={() => setSession('DEMO_SESSION')}>填入演示 session<Sparkles size={14}/></button> : <button type="button" className="text-link session-help" onClick={() => setDialog('help')}>如何获取 session？<ExternalLink size={13}/></button>}
             <div className="session-consent-note"><ShieldCheck size={18}/><p>session 具有账号访问权限。仅提交你有权使用的账号凭据，授权本站运营方为本次开通使用；加密后最多可使用 30 分钟，任务结束后删除。</p></div>
             <label className="checkbox-label"><input type="checkbox" name="consent" required/><span>我已阅读<button type="button" onClick={() => setDialog('privacy')}>授权与隐私说明</button>，同意本次使用，了解提交兑换不代表订阅已经到账。</span></label>
-            <ErrorMessage message={error}/><button className="button primary full activation-submit" disabled={busy || !checked?.redeemable || !session.trim()}>{busy ? <Busy label="提交兑换"/> : <>提交兑换申请<ArrowRight size={17}/></>}</button>
+            <ErrorMessage message={error}/><button className="button primary full activation-submit" disabled={busy || !checked?.redeemable || !session.trim() || session.length > MAX_SESSION_CHARACTERS}>{busy ? <Busy label="提交兑换"/> : <>提交兑换申请<ArrowRight size={17}/></>}</button>
           </form>
           <div className="panel-bottom"><KeyRound size={14}/>一次兑换 · 一笔任务 · 全程可查</div>
         </>}

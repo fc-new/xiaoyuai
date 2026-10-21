@@ -110,3 +110,35 @@ test('loopback IP alias supports administrator login', async ({ page, baseURL })
   await page.getByLabel('管理密码', { exact: true }).fill('e2e-password'); await page.getByRole('button', { name: '进入工作台' }).click();
   await expect(page.getByRole('heading', { name: /xiaoyu AI 工作台/ })).toBeVisible();
 });
+
+test('session fields retain full pasted content and show a clear size error without truncation', async ({ page }) => {
+  const { MAX_SESSION_CHARACTERS } = await import('../../shared/session-limits.js');
+  await page.goto('/');
+  await page.getByRole('textbox', { name: /兑换卡密/ }).fill(codes[2]);
+  const checked = page.waitForResponse(response => response.url().endsWith('/api/activation/check'));
+  await page.getByRole('button', { name: '校验卡密', exact: true }).click();
+  expect((await checked).status()).toBe(200);
+  await expect(page.locator('.code-verified')).toBeVisible();
+  const field = page.getByLabel(/账号 session/);
+  const large = JSON.stringify({ fixture: 'x'.repeat(65536) });
+  await field.fill(large);
+  expect(await field.inputValue()).toBe(large);
+  expect(await field.getAttribute('maxlength')).toBeNull();
+  const oversized = 'x'.repeat(MAX_SESSION_CHARACTERS + 1);
+  await field.fill(oversized);
+  expect((await field.inputValue()).length).toBe(MAX_SESSION_CHARACTERS + 1);
+  await expect(page.getByRole('alert')).toContainText('session 内容超过');
+  await expect(page.getByRole('button', { name: '提交兑换申请' })).toBeDisabled();
+  await page.getByRole('button', { name: '填入演示 session' }).click();
+  await page.getByRole('checkbox').check();
+  await page.getByRole('button', { name: '提交兑换申请' }).click();
+  await expect(page.locator('.job-heading .status-badge')).toHaveText('排队待处理');
+  await page.getByRole('button', { name: '更新 session', exact: true }).click();
+  const update = page.getByRole('textbox', { name: '更新 session', exact: true });
+  await update.fill(large);
+  expect(await update.inputValue()).toBe(large);
+  expect(await update.getAttribute('maxlength')).toBeNull();
+  await update.fill(oversized);
+  await expect(page.getByRole('alert')).toContainText('session 内容超过');
+  await expect(page.getByRole('button', { name: '提交更新' })).toBeDisabled();
+});

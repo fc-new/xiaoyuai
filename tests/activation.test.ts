@@ -141,3 +141,44 @@ test('demo codes reject real sessions, expired ciphertext is purged and failure 
 test('changing the encryption key cannot silently invalidate existing sessions', async () => {
   await assert.rejects(createApp({ ...config, voucherSecret: 'b2'.repeat(32) }), /Restore.*original/);
 });
+
+test('complete sessions up to one million characters survive redeem and update, including long tokens and multibyte JSON', async () => {
+  const { MAX_SESSION_CHARACTERS, SESSION_LENGTH_ERROR } = await import('../shared/session-limits.js');
+  const makeLargeSession = (suffix: string) => {
+    const value = { ...JSON.parse(session()), accessToken: token + suffix.repeat(40000), padding: '' };
+    const overhead = JSON.stringify(value).length;
+    value.padding = '中'.repeat(MAX_SESSION_CHARACTERS - overhead);
+    return JSON.stringify(value);
+  };
+  const large = makeLargeSession('x');
+  assert.equal(large.length, MAX_SESSION_CHARACTERS);
+  assert.ok(Buffer.byteLength(JSON.stringify({ session: large })) > 96 * 1024);
+  const generated = await request('/admin/activation/codes/generate', { planId: 'plus-month', isDemo: false, source: 'large-session-regression', count: 1 }, true);
+  const code = generated.body.codes[0];
+  const input = { code, session: large, requestKey: 'e'.repeat(32), consent: true };
+  const tooLarge = await request('/activation/redeem', { ...input, session: large + ' ' });
+  assert.equal(tooLarge.status, 413); assert.equal(tooLarge.body.error, SESSION_LENGTH_ERROR);
+  assert.equal((await request('/activation/check', { code })).body.redeemable, true);
+  const created = await request('/activation/redeem', input);
+  assert.equal(created.status, 200); assert.equal(created.body.job.accountEmail, 'owner@example.com');
+  assert.equal(JSON.stringify(created.body).includes('中'), false);
+  const receipt = { id: created.body.job.id, accessCode: input.requestKey };
+  const original = (await db.prepare('SELECT session_ciphertext FROM activation_jobs WHERE id=?').get<{ session_ciphertext: string }>(receipt.id))!.session_ciphertext;
+  assert.ok(original.length < large.length); // Unneeded profile text is not retained.
+  const rejected = await request('/activation/session', { ...receipt, session: large + ' ', consent: true });
+  assert.equal(rejected.status, 413); assert.equal(rejected.body.error, SESSION_LENGTH_ERROR);
+  assert.equal((await db.prepare('SELECT session_ciphertext FROM activation_jobs WHERE id=?').get(receipt.id))!.session_ciphertext, original);
+  const updated = await request('/activation/session', { ...receipt, session: makeLargeSession('y'), consent: true });
+  assert.equal(updated.status, 200); assert.equal(updated.body.job.sessionAvailable, true);
+  await request(`/admin/activation/jobs/${receipt.id}`, { status: 'processing', note: '大体积测试凭据，无实际充值。' }, true, 'PATCH');
+  const revealed = await request(`/admin/activation/jobs/${receipt.id}/session`, { password }, true);
+  assert.equal(revealed.body.accessToken, token + 'y'.repeat(40000));
+  await request('/activation/delete-session', receipt);
+});
+
+test('unrelated endpoints retain their smaller body limit and oversized transport requests return JSON 413', async () => {
+  const unrelated = await request('/activation/check', { code: 'INVALID-CODE-12345678', padding: 'x'.repeat(100 * 1024) });
+  assert.equal(unrelated.status, 413); assert.equal(typeof unrelated.body.error, 'string');
+  const tooLarge = await request('/activation/redeem', { session: 'x'.repeat(8 * 1024 * 1024 + 1) });
+  assert.equal(tooLarge.status, 413); assert.equal(typeof tooLarge.body.error, 'string');
+});

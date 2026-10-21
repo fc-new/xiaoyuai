@@ -1,4 +1,5 @@
 import { registerActivations, ActivationError } from './activation.js';
+import { SESSION_REQUEST_BYTES } from '../shared/session-limits.js';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
@@ -136,6 +137,7 @@ export async function createApp(config: Config) {
     }
   });
 
+  app.use(['/api/activation/redeem', '/api/activation/session'], express.json({ limit: SESSION_REQUEST_BYTES }));
   app.use(express.json({ limit: '96kb' }));
   app.use('/api', (req, _res, next) => {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
@@ -348,6 +350,9 @@ export async function createApp(config: Config) {
     app.get('/{*path}', (_req, res) => res.sendFile(resolve('dist/index.html')));
   }
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (error && typeof error === 'object' && 'type' in error && error.type === 'entity.too.large') {
+      res.status(413).json({ error: '提交内容过大，请确认只复制了 session JSON，或缩短本次提交内容。' }); return;
+    }
     if (error instanceof z.ZodError) { res.status(400).json({ error: '请检查填写内容，必填项或格式不正确。' }); return; }
     if (error instanceof ActivationError) { res.status(error.status).json({ error: error.message }); return; }
     if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
