@@ -5,7 +5,10 @@ export function Fish({ className = '' }: { className?: string }) {
   return <svg viewBox="0 0 50 40" fill="none" aria-hidden="true" className={className}><path d="M3 20C14 4 31 4 40 20 31 36 14 36 3 20Z" fill="currentColor"/><path d="m38 20 11-12v24L38 20Z" fill="currentColor"/><circle cx="15" cy="17" r="2.5" fill="var(--fish-eye,#f6f5ed)"/></svg>;
 }
 export function Logo() {
-  return <a className="brand" href="/" aria-label="xiaoyu AI 首页"><span className="brand-icon"><Fish/></span><span className="brand-word">xiaoyu <b>AI</b><small>XIAOYUAI</small></span></a>;
+  return <a className="brand" href="/" aria-label="xiaoyu AI 首页">
+    <span className="brand-icon" aria-hidden="true"><span>xy</span></span>
+    <span className="brand-word">xiaoyu <b>AI</b><small>AI 会员充值</small></span>
+  </a>;
 }
 export function Busy({ label = '处理中' }: { label?: string }) { return <span className="busy"><LoaderCircle size={17}/>{label}…</span>; }
 export function ErrorMessage({ message }: { message: string }) { return message ? <div className="error-message" role="alert">{message}</div> : null; }

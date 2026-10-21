@@ -2,6 +2,8 @@
 
 前端和 API 放在一个 Render Web Service；订单、履约记录和后台会话放在 Neon PostgreSQL。无需购买服务器或域名。免费套餐有额度和休眠限制，具体以平台创建时显示为准。以下配置明确选择演示付款，不产生真实扣款。
 
+当前公开预览为 <https://xiaoyuai.onrender.com>。2026-10-21 检查 `/api/health` 返回 PostgreSQL 正常、`paymentMode=demo`、卡密服务可用；这不代表真实收款已经启用。
+
 ## 1. 准备 Neon
 
 1. 登录 <https://console.neon.tech/>，在 **Free** 套餐下新建项目 `xiaoyuai`。如可选，选择与 Render 接近的区域（配置默认 Singapore）。不要选择付费升级。
