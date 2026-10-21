@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { activationSchema } from './activation-schema.js';
 import { openDatabase, type OrderRow } from './db.js';
 
 type Value = string | number | null;
@@ -35,6 +36,7 @@ const postgresSchema = `
     order_id TEXT PRIMARY KEY REFERENCES orders(id), channel TEXT NOT NULL CHECK(channel IN ('wechat','alipay')),
     transaction_id TEXT UNIQUE, qr_code TEXT, created_at TEXT NOT NULL
   );
+  ${activationSchema}
   CREATE INDEX IF NOT EXISTS orders_created ON orders(created_at DESC);
 `;
 

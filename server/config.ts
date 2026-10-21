@@ -20,6 +20,7 @@ export function runtimeConfig(env: NodeJS.ProcessEnv) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a valid TCP port');
   const trustProxyHops = Number(env.TRUST_PROXY_HOPS || (render ? 1 : 0));
   if (!Number.isInteger(trustProxyHops) || trustProxyHops < 0 || trustProxyHops > 10) throw new Error('TRUST_PROXY_HOPS must be an integer from 0 to 10');
+  if (!env.VOUCHER_SECRET || !/^[a-fA-F0-9]{64}$/.test(env.VOUCHER_SECRET)) throw new Error('VOUCHER_SECRET must be 32 random bytes encoded as 64 hex characters');
   return { production, mode: mode as 'demo' | 'stripe' | 'merchant', origin, adminPasswordHash, port, trustProxyHops,
     voucherSecret: env.VOUCHER_SECRET,
     databasePath: env.DATABASE_PATH || './data/xiaoyuai.sqlite', databaseUrl: env.DATABASE_URL };

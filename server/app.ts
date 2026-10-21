@@ -1,3 +1,4 @@
+import { registerActivations, ActivationError } from './activation.js';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
@@ -23,7 +24,7 @@ export interface Config {
   developmentApiPort?: number;
   databaseUrl?: string;
   trustProxyHops?: number;
-  voucherSecret?: string;
+  voucherSecret?: string; purchasesEnabled?: boolean;
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const now = () => new Date().toISOString();
@@ -135,7 +136,7 @@ export async function createApp(config: Config) {
     }
   });
 
-  app.use(express.json({ limit: '16kb' }));
+  app.use(express.json({ limit: '96kb' }));
   app.use('/api', (req, _res, next) => {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
       // All browser mutations, including cookie-authenticated admin actions, require our configured origin.
@@ -145,13 +146,14 @@ export async function createApp(config: Config) {
   });
   app.get('/api/health', async (_req, res) => {
     await db.prepare('SELECT 1').get();
-    res.json({ status: 'ok', database: 'ok', databaseType: db.dialect, paymentMode: config.mode,
+    res.json({ workflowVersion: 'external-code-session-v1', status: 'ok', database: 'ok', databaseType: db.dialect, paymentMode: config.mode,
       paymentReady, voucherReady: Boolean(vault) });
   });
-  app.get('/api/catalog', (_req, res) => res.json({ plans, paymentMode: config.mode, paymentReady: paymentReady && Boolean(vault), voucherReady: Boolean(vault), maxQuantity: 10, voucherValidityDays: 365, paymentChannels: config.mode === 'merchant' ? merchant.channels : [], currency: 'CNY' }));
+  app.get('/api/catalog', (_req, res) => res.json({ plans, paymentMode: config.mode, paymentReady: Boolean(config.purchasesEnabled) && paymentReady && Boolean(vault), voucherReady: Boolean(vault), maxQuantity: 10, voucherValidityDays: 365, paymentChannels: config.mode === 'merchant' ? merchant.channels : [], currency: 'CNY' }));
 
   const createLimit = rateLimit({ windowMs: 15 * 60000, limit: 15, message: { error: '创建订单过于频繁，请稍后再试。' } });
   app.post('/api/orders', createLimit, async (req, res) => {
+    if (!config.purchasesEnabled) throw new HttpError(410, '本站仅提供卡密兑换，卡密由外部平台或商家提供。');
     const input = z.object({ planId: z.string(), email: z.email().max(254), contact: z.string().trim().min(2).max(100), consent: z.literal(true), quantity: z.number().int().min(1).max(10).default(1) }).parse(req.body);
     const plan = plans.find(p => p.id === input.planId);
     if (!plan) throw new HttpError(400, '套餐不存在，请重新选择。');
@@ -271,6 +273,15 @@ export async function createApp(config: Config) {
     res.cookie('xy_admin', token, { httpOnly: true, sameSite: 'strict', secure: Boolean(config.production), maxAge: 8 * 60 * 60000, path: '/api/admin' });
     res.json({ ok: true });
   });
+  let stopActivations: () => void = () => {};
+  try {
+    if (config.voucherSecret) stopActivations = await registerActivations(app, db, { secret: config.voucherSecret, adminAuth, verifyPassword: password => {
+      const [salt, expected] = config.adminPasswordHash.split(':');
+      return Boolean(salt && expected && /^[0-9a-f]{128}$/.test(expected) && timingSafeEqual(scryptSync(password, salt, 64), Buffer.from(expected, 'hex')));
+    } });
+  } catch (error) { await db.close(); throw error; }
+  const closeDatabase = db.close.bind(db);
+  db.close = async () => { stopActivations(); await closeDatabase(); };
   app.use('/api/admin', adminAuth);
   commerce.adminRoutes(app, async (order, reference) => {
     if (order.payment_mode === 'merchant') {
@@ -337,7 +348,8 @@ export async function createApp(config: Config) {
     app.get('/{*path}', (_req, res) => res.sendFile(resolve('dist/index.html')));
   }
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    if (error instanceof z.ZodError) { res.status(400).json({ error: '请检查填写内容：邮箱、联系方式和服务条款为必填项。' }); return; }
+    if (error instanceof z.ZodError) { res.status(400).json({ error: '请检查填写内容，必填项或格式不正确。' }); return; }
+    if (error instanceof ActivationError) { res.status(error.status).json({ error: error.message }); return; }
     if (error instanceof HttpError) { res.status(error.status).json({ error: error.message }); return; }
     if (error instanceof PaymentError) { res.status(error.status).json({ error: error.message }); return; }
     if (error instanceof SyntaxError && 'body' in error) { res.status(400).json({ error: '请求格式不正确。' }); return; }

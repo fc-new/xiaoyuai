@@ -4,7 +4,7 @@ import { scryptSync } from 'node:crypto';
 import { runtimeConfig } from '../server/config.js';
 
 const password = 'configuration-test-password';
-const hosted = { NODE_ENV: 'production', RENDER: 'true', RENDER_EXTERNAL_URL: 'https://fixture.onrender.com',
+const hosted = { VOUCHER_SECRET: 'a1'.repeat(32), NODE_ENV: 'production', RENDER: 'true', RENDER_EXTERNAL_URL: 'https://fixture.onrender.com',
   DATABASE_URL: 'postgresql://fixture:fixture@db.example/fixture?sslmode=require', ADMIN_PASSWORD: password };
 
 test('Render uses its assigned HTTPS URL, durable database and bounded proxy trust', () => {
@@ -31,4 +31,9 @@ test('a custom domain replaces the provider domain and invalid proxy/port settin
   assert.equal(runtimeConfig({ ...hosted, APP_ORIGIN: 'https://xiaoyuai.example/' }).origin, 'https://xiaoyuai.example');
   assert.throws(() => runtimeConfig({ ...hosted, TRUST_PROXY_HOPS: 'true' }), /TRUST_PROXY_HOPS/);
   assert.throws(() => runtimeConfig({ ...hosted, PORT: 'invalid' }), /PORT/);
+});
+
+test('voucher encryption requires a stable private key', () => {
+  assert.throws(() => runtimeConfig({ ...hosted, VOUCHER_SECRET: '' }), /VOUCHER_SECRET/);
+  assert.throws(() => runtimeConfig({ ...hosted, VOUCHER_SECRET: 'short' }), /VOUCHER_SECRET/);
 });

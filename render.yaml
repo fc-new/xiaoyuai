@@ -3,7 +3,7 @@ services:
     name: xiaoyuai
     runtime: node
     plan: free
-    region: singapore
+    region: oregon
     branch: main
     buildCommand: npm ci --include=dev --no-audit --no-fund && npm run build
     startCommand: npm start
@@ -21,7 +21,7 @@ services:
         value: "1"
       - key: DATABASE_URL
         sync: false
-      - key: ADMIN_PASSWORD
-        sync: false
       - key: VOUCHER_SECRET
+        sync: false
+      - key: ADMIN_PASSWORD
         sync: false

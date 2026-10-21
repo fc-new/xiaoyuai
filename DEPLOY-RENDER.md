@@ -1,77 +1,38 @@
-# Render + Neon 免费预览部署
+# Render + Neon 部署
 
-前端和 API 放在一个 Render Web Service；订单、履约记录和后台会话放在 Neon PostgreSQL。无需购买服务器或域名。免费套餐有额度和休眠限制，具体以平台创建时显示为准。以下配置明确选择演示付款，不产生真实扣款。
+复用现有免费 Render 服务 `srv-dbbkfq4s728c738oia70` 和 Neon 项目 `billowing-mode-33898462`。不要创建重复或付费资源。
 
-## 1. 准备 Neon
+- 网站：https://xiaoyuai.onrender.com
+- 后台：https://xiaoyuai.onrender.com/admin
+- Render 设置：https://dashboard.render.com/web/srv-dbbkfq4s728c738oia70/settings
+- Neon 设置：https://console.neon.tech/app/projects/billowing-mode-33898462/settings
 
-1. 登录 <https://console.neon.tech/>，在 **Free** 套餐下新建项目 `xiaoyuai`。如可选，选择与 Render 接近的区域（配置默认 Singapore）。不要选择付费升级。
-2. 在项目 **Connect** 中选择数据库和角色，开启 **Connection pooling**，复制 PostgreSQL 连接字符串。通常主机含 `-pooler`，字符串含 `sslmode=require`。
-3. 此字符串包含数据库密码，只粘贴到下一步 Render 的 `DATABASE_URL` 私有环境变量。不要发到聊天、提交 Git 或写入公开日志。
+## 必要配置
 
-应用首次启动会自动创建所需表，并用事务和 PostgreSQL advisory lock 保护初始化。无需手动运行 SQL。应用会验证远程数据库的 TLS 证书。
+Node 24.19.0；构建命令 `npm ci --include=dev --no-audit --no-fund && npm run build`；启动命令 `npm start`；健康检查 `/api/health`。保留 `NODE_ENV=production`、`REQUIRE_DATABASE_URL=1`、`TRUST_PROXY_HOPS=1` 和正式 HTTPS 域名。
 
-## 2. 创建 Render 免费服务
+私有环境变量：
 
-登录 <https://dashboard.render.com/>，连接有权读取 `fc-new/xiaoyuai` 的 GitHub 账号。
+- `DATABASE_URL`：原 Neon pooled PostgreSQL URL，使用验证 TLS，不打印、不放 Git。
+- `ADMIN_PASSWORD`：保留 Render 中现有值，不同时配置 `ADMIN_PASSWORD_HASH`。管理员可以在 Render 私有 Environment 中查看。
+- `VOUCHER_SECRET`：保留原 64 位十六进制值，不使用另一个随机值覆盖；它保护已有卡密及临时 session。新建环境可在本机安全生成 32 随机字节的 hex，再配置到 Render 私有环境，不通过聊天传递。
 
-仓库 `main` 分支包含本文件及 `render.yaml` 后，可使用：
+首次启动使用增量建表，保护原 purchase_orders、vouchers、redemptions、退款与订单记录，增加 activation_codes、activation_jobs、activation_events 和独立密钥指纹表。无须手工执行 SQL。启动时密钥指纹不匹配会失败，需要恢复原值。
 
-[从此仓库部署到 Render](https://render.com/deploy?repo=https://github.com/fc-new/xiaoyuai)
+`render.yaml` 保持免费计划，不包含付费磁盘或数据库。Neon 与 Render 免费服务可能休眠；休眠时临时凭据过期后仍不可读取，密文字段在恢复后清理。生产运营前需确认可用性符合实际服务要求。
 
-也可以在 Render 选择 **New → Blueprint**，选择此仓库的 `main` 分支。私有仓库必须先授权 Render GitHub App 访问。
+## 本次流程
 
-创建前确认只有一个 **Free Web Service**，没有付费数据库、磁盘或其他付费资源。Blueprint 会提示填写三个私有变量：
+新首页为外部卡密兑换入口，不接受新购买订单。先登录后台，在「卡密管理」生成或导入卡密，再交给外部销售渠道。正式/演示类型按卡密配置，与保留的 `PAYMENT_MODE=demo` 历史收款设置无关。
 
-| 名称 | 填写内容 |
-| --- | --- |
-| `VOUCHER_SECRET` | 32 随机字节编码为 64 位十六进制，首次生成后保留并安全备份；不要每次部署重置 |
-| `DATABASE_URL` | Neon 的池化连接字符串 |
-| `ADMIN_PASSWORD` | 你自行生成并保存的 16–256 位高强度管理密码；推荐密码管理器生成随机密码 |
+用户提交后进入履约队列；Mastercard 实际扣款尚未自动对接，运营方在官方支持的结算流程中付款，凭真实结果确认交付。不要因为页面能提交、密文已保存或卡密有效，就宣布订阅已成功开通。
 
-不要填写固定示例密码。管理员密码仅在启动时转换为 scrypt 哈希，不返回给浏览器或写入日志。Render 中不要同时设置 `ADMIN_PASSWORD` 和 `ADMIN_PASSWORD_HASH`。
+## 发布检查
 
-`render.yaml` 已配置 Node 24、锁定依赖安装、构建、启动、健康检查、单层代理和 `PAYMENT_MODE=demo`。无需运行 `npm run setup`，也不需要上传本地 `.env`、`.local/` 或 SQLite 文件。
+1. 先运行构建、SQLite/PostgreSQL 接口与浏览器检查。
+2. 推送 main 后等待 Render 对该提交部署成功，验证 `/api/health` 的 `workflowVersion=external-code-session-v1` 和 `databaseType=postgres`。
+3. 验证首页、后台、静态资源与响应安全头。
+4. 生成明确标为演示的卡密，用 `DEMO_SESSION` 跑一次兑换→领取→演示交付→私有查询，确认临时密文已清空。
+5. 保留原有用户订单；演示测试不得进行实际扣款或提交真实账号 session。
 
-如果无法使用 Blueprint，手动新建 **Web Service** 并选择此仓库：
-
-| 设置 | 值 |
-| --- | --- |
-| Branch / Runtime / Instance | `main` / Node / **Free** |
-| Build Command | `npm ci --include=dev --no-audit --no-fund && npm run build` |
-| Start Command | `npm start` |
-| Health Check Path | `/api/health` |
-| `NODE_VERSION` | `24.19.0` |
-| `NODE_ENV` | `production` |
-| `PAYMENT_MODE` | `demo` |
-| `REQUIRE_DATABASE_URL` | `1` |
-| `TRUST_PROXY_HOPS` | `1` |
-| `DATABASE_URL` / `ADMIN_PASSWORD` / `VOUCHER_SECRET` | 上表中的私有值 |
-
-## 3. 打开与验证
-
-Render 状态变成 **Live** 后，使用它实际显示的 `https://…onrender.com` 地址。此文档没有预设或声称已创建任何域名。默认读取 Render 自动提供的 `RENDER_EXTERNAL_URL`；无需猜测 `APP_ORIGIN`。
-
-1. 打开首页，确认有三个套餐并有演示说明。
-2. 用测试邮箱创建订单，保存订单号和查询码，完成模拟付款。
-3. 在订单中查看并复制卡密，打开 `/redeem` 核对目标邮箱后提交，保存兑换编号和查询码。
-4. 打开 `/admin`，在兑换与履约单中填写负责人、开始处理，再填写演示交付凭据并确认完成；前往 `/redeem` 查询履约时间线。
-5. 在 Render 执行一次重新部署，用原查询码确认订单仍然存在。
-6. `/api/health` 应返回 `status=ok`、`database=ok`、`databaseType=postgres`、`paymentMode=demo`。
-
-不要用真实客户资料测试。免费实例休眠后首次打开可能较慢；连接数据库失败时，健康检查会失败，应用不会悄悄使用临时 SQLite。查看 Render 和 Neon 的状态、连接字符串、数据库角色权限及区域设置。
-
-## 后续正式收款
-
-当前预览不收取真实款项。需要正式收款时，再按 README 配置微信／支付宝商户信息，将 `PAYMENT_MODE` 改为 `merchant`，确认 HTTPS 回调、价格和真实到账。商户私钥可使用 Render Secret Files，环境变量指向对应私有文件；不要放进 Git。
-
-如绑定自定义域名，将 `APP_ORIGIN` 设置为该域名的完整 HTTPS 来源，然后重新部署。更换管理密码后，可在专用数据库执行 `DELETE FROM admin_sessions` 撤销既有会话。进程内限流仍要求单个 Web Service；本配置不承诺免费服务可用于持续稳定的正式收款。
-
-原有本地 SQLite 数据不会自动迁入 Neon。现有服务升级应继续使用原 Neon 数据库；如本地已有真实订单，应单独备份并安排导入。
-
-## 开发验证
-
-`npm test` 验证 SQLite。对本机一次性 PostgreSQL 实例，可使用 `TEST_DATABASE_URL=postgresql://…@127.0.0.1:5432/… npm test` 复用整套 API／支付测试。测试只接受回环地址，并为每个夹具建立独立临时 schema；不要提供正式数据库地址。GitHub Actions 同时配置 SQLite 和 PostgreSQL 两套验证。
-
-## 现有服务升级
-
-先阅读 [迁移和回滚手册](docs/RELEASE.md)。保留现有数据库和管理员配置，只补充新的卡密密钥；不要重新创建生产数据库。新增表自动迁移，旧订单不生成卡密。先完成分支审查和预览，再发布经过测试的提交。
+历史记录通过 `/orders`、`/redeem` 和 `/admin/orders` 访问。新配置不删除原数据，不轮换管理员、数据库或原加密密钥。

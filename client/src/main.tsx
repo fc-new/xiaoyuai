@@ -2,8 +2,11 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 import Admin from './Admin';
+import LegacyAdmin from './LegacyAdmin';
+import LegacyStorefront from './LegacyStorefront';
 import Redeem from './Redeem';
 import ErrorBoundary from './ErrorBoundary';
 import './styles.css';
-
-createRoot(document.getElementById('root')!).render(<React.StrictMode><ErrorBoundary>{window.location.pathname.startsWith('/admin') ? <Admin/> : window.location.pathname === '/redeem' ? <Redeem/> : <App/>}</ErrorBoundary></React.StrictMode>);
+const path = window.location.pathname;
+const content = path.startsWith('/admin/orders') ? <LegacyAdmin/> : path.startsWith('/admin') ? <Admin/> : path.startsWith('/redeem') ? <Redeem/> : path.startsWith('/orders') || new URLSearchParams(window.location.search).has('payment') ? <LegacyStorefront/> : <App/>;
+createRoot(document.getElementById('root')!).render(<React.StrictMode><ErrorBoundary>{content}</ErrorBoundary></React.StrictMode>);

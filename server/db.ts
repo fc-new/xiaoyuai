@@ -1,3 +1,4 @@
+import { activationSchema } from './activation-schema.js';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -33,6 +34,7 @@ export function openDatabase(path: string) {
       order_id TEXT PRIMARY KEY REFERENCES orders(id), channel TEXT NOT NULL CHECK(channel IN ('wechat','alipay')),
       transaction_id TEXT UNIQUE, qr_code TEXT, created_at TEXT NOT NULL
     );
+    ${activationSchema}
     CREATE INDEX IF NOT EXISTS orders_created ON orders(created_at DESC);
   `);
   return db;

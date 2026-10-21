@@ -66,6 +66,16 @@ if (existsSync(configPath)) {
   writeFileSync(configPath, JSON.stringify(preview, null, 2), { mode: 0o600, flag: 'wx' });
 }
 if (!preview.voucherSecret) {
+  const previewDatabase = join(localDir, 'preview.sqlite');
+  if (existsSync(previewDatabase)) {
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(previewDatabase, { readOnly: true });
+    try {
+      for (const table of ['activation_key_check', 'voucher_keys']) {
+        if (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table) && db.prepare(`SELECT * FROM ${table} LIMIT 1`).get()) throw new Error('Restore the original preview voucherSecret from your backup.');
+      }
+    } finally { db.close(); }
+  }
   preview.voucherSecret = randomBytes(32).toString('hex');
   writeFileSync(configPath, JSON.stringify(preview, null, 2), { mode: 0o600 });
 }
